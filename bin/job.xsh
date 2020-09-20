@@ -11,11 +11,12 @@ parser = argparse.ArgumentParser()
 
 parser.add_argument('mode',
                     type=str,
-                    choices=['new','edit','run','kill','view'] + ['n','e','r','k','v']
+                    choices=['new','edit','run','kill','view','ls','del'] + ['n','e','r','k','v'],
                     help='operation to run')
 parser.add_argument('name',
                     type=str,
                     default=None,
+                    nargs='?',
                     help='experiment name (used to find the right file)')
 parser.add_argument('-f',
                     action='store_true',
@@ -25,15 +26,17 @@ parser.add_argument('-f',
 #                    help='suppress inserting name=[window name] at the end of the command')
 
 args = parser.parse_args()
-session = name
 
 # figure out our directory paths
 root_dir = pathlib.Path(__file__).parent.parent.absolute() # the top level git diretory for job/
 jobs_dir = root_dir / 'jobs'
+trash_dir = root_dir / 'trash'
 
 assert root_dir.is_dir()
 if not jobs_dir.is_dir():
     jobs_dir.mkdir()
+if not trash_dir.is_dir():
+    trash_dir.mkdir()
 
 # deal with abbvs
 if args.mode == 'n':
@@ -58,7 +61,7 @@ if 'TMUX' in ${...}:
     die("Dont run this from within tmux")
 
 # modes where it's okay to not have a job name
-if args.mode not in ['list']:
+if args.mode not in ['ls']:
     if args.name is None:
         parser.print_help()
         die(f"Please provide a job name")
@@ -93,7 +96,7 @@ def process_exists(prefix):
     except CalledProcessError:
         return False # pgrep found nothing
     lines = [l.strip() for l in lines if l.strip()!='']
-    assert len(line) != 0, "I think pgrep should error out instead of this happening"
+    assert len(lines) != 0, "I think pgrep should error out instead of this happening"
     print("Found processes:")
     for line in lines:
         print(f"\t{line}")
@@ -114,6 +117,69 @@ def kill(session):
     else:
         print("no processes to kill")
 
+
+
+def sorted_jobs():
+    """
+    list of jobs in jobs folder sorted by last modified time
+    """
+    jobs = []
+    for name in jobs_dir.iterdir():
+        jobs.append((name.name,os.path.getmtime(get_job_file(name.name)))) # get last modified time (float: time since unix epoch)
+    jobs = sorted(jobs, reverse=True, key=lambda x:x[1])
+    return [job[0] for job in jobs] # strip out the modification time
+
+def view_session(session):
+    if not session_exists(session):
+        die(f"Can't find session {session}")
+    tmux a -t @(session)
+
+def parse_job(name):
+    """
+    parse the sessions in the job file of the given name and return a dict of {window_name:cmd}
+    """
+    if not job_exists(name):
+        die(f"Job {name} doesn't exist")
+    file = get_job_file(name)
+    assert file.exists(), "should never happen"
+    
+    windows = {}
+    for line in open(file,'r'):
+        line = line.strip()
+        if line == '':
+            continue
+        if ':' not in line:
+            die(f"Colon missing in line: {line}, aborting")
+        win_name, *cmd = line.split(':')
+        cmd = ':'.join(cmd) # in case it had any colons in it
+        cmd = cmd.strip()
+        windows[win_name] = f'cd ~/proj/ec && python bin/test_list_repl.py {cmd} prefix={name} name={win_name}'
+    print(f"Parsed {len(windows)} windows")
+    return windows
+
+def new_session(sess_name):
+    print(f"Launching session: {sess_name}")
+    tmux new-session -d -s @(sess_name)
+
+def new_window(sess_name,win_name,cmd=None):
+    print(f"* Launching window {win_name}: {cmd}")
+    # first make a new window with the right name
+    tmux new-window -t @(sess_name) -n @(win_name)
+    if cmd is not None:
+        # now send keys to the session (which will have the newly created window
+        # active already so this will run in that new window)
+        # (Note: C-m is like <CR>)
+        tmux send-keys -t @(sess_name) @(cmd) C-m
+    print("made it")
+
+def new_windows(sess_name, windows):
+    for i,(win_name,cmd) in enumerate(windows.items()):
+        new_window(sess_name, win_name, cmd)
+        time.sleep(1.01) # so that the hydra session gets a different name
+
+
+
+session = args.name
 if args.mode == 'new':
     if job_exists(session):
         die(f"A job named {session} already exists, you may want to edit it or delete it")
@@ -145,68 +211,16 @@ elif args.mode == 'kill':
 elif args.mode == 'view':
     view_session(session)
     sys.exit(0)
-elif args.mode == 'list':
+elif args.mode == 'del':
+    kill(session)
+    if not job_exists(session):
+        die("job doesnt exist")
+    get_job_file(session).rename(trash_dir / session)
+    print(f"moved {session} to trash")
+elif args.mode == 'ls':
     for name in sorted_jobs():
-        if session_exists(session):
+        if session_exists(name):
             mlb.green(f"{name}") # print in green if already running
         else:
-            print(f"{name}") # else print normally
+            mlb.red(f"{name}") # else print normally
     sys.exit(0)
-
-def sorted_jobs():
-    """
-    list of jobs in jobs folder sorted by last modified time
-    """
-    jobs = []
-    for name in jobs_dir.iterdir():
-        jobs.append((name,os.path.getmtime(get_job_file(name)))) # get last modified time (float: time since unix epoch)
-    jobs = sorted(jobs, reverse=True, key=lambda x:x[1])
-    return [job[1] for job in jobs] # strip out the modification time
-
-def view_session(session):
-    if not session_exists(session):
-        die(f"Can't find session {session}")
-    tmux a -t @(session)
-
-def parse_job(name):
-    """
-    parse the sessions in the job file of the given name and return a dict of {window_name:cmd}
-    """
-    if not job_exists(name):
-        die(f"Job {name} doesn't exist")
-    file = get_job_file(name)
-    assert file.exists(), "should never happen"
-    
-    windows = {}
-    for line in open(file,'r'):
-        line = line.strip()
-        if line == '':
-            continue
-        if ':' not in line:
-            die(f"Colon missing in line: {line}, aborting")
-        window, *cmd = line.split(':')
-        cmd = ':'.join(cmd) # in case it had any colons in it
-        cmd = cmd.strip()
-        cmd = f'cd ~/proj/ec && python bin/test_list_repl.py {cmd} prefix={name} name={window}'
-        windows[name] = cmd
-    return windows
-
-def new_session(sess_name):
-    print(f"Launching session: {name}")
-    tmux new-session -d -s @(sess_name)
-
-def new_window(sess_name,win_name,cmd=None):
-    print(f"* Launching window {win_name}: {cmd}")
-    # first make a new window with the right name
-    tmux new-window -t @(sess_name) -n @(win_name)
-    if cmd is not None:
-        # now send keys to the session (which will have the newly created window
-        # active already so this will run in that new window)
-        # (Note: C-m is like <CR>)
-        tmux send-keys -t @(sess_name) @(cmd) C-m
-
-def new_windows(sess_name, windows):
-    for i,(win_name,cmd) in enumerate(session_dict.items()):
-        new_window(sess_name, win_name, cmd)
-        time.sleep(1.01) # so that the hydra session gets a different name
-
