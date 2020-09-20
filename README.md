@@ -1,2 +1,2 @@
-# jobs
+# job
 Custom job manager
