@@ -6,7 +6,7 @@ import mlb
 import pathlib
 import re
 
-BASE_CMD = "cd ~/proj/ec && python bin/test_list_repl.py"
+BASE_CMD = "cd ~/proj/ec && python bin/matt.py"
 
 
 parser = argparse.ArgumentParser()
@@ -86,6 +86,14 @@ def job_exists(name):
     """
     return get_job_file(name).exists()
 
+def kill_by(name):
+    """
+    We don't simply want to kill all processes with prefix={name} because then if name='test' we'd also kill things containing strings like 'prefix=testing'. So instead this function turns it into a more unique name with a clear ending
+    """
+    if '___' in name:
+        die(f"please don't use ___ in your names: {name}")
+    return f'kill_by={name}___'
+
 def session_exists(name):
     """
     returns True if a tmux session of this name is running
@@ -97,13 +105,13 @@ def session_exists(name):
             return True
     return False
 
-def process_exists(prefix):
+def process_exists(contains):
     """
     returns True if at least one process with a command that contains the string f'prefix={prefix}' is running
     """
     try:
         # -a just makes it display more than just the pid
-        lines=$(pgrep -a -u mlbowers --full prefix=@(prefix)).split('\n')
+        lines=$(pgrep -a -u mlbowers --full @(contains)).split('\n')
     except CalledProcessError:
         return False # pgrep found nothing
     lines = [l.strip() for l in lines if l.strip()!='']
@@ -122,8 +130,9 @@ def kill(session):
         print(f"killed tmux session `{session}`")
     else:
         print("no sessions to kill")
-    if process_exists(session):
-        pkill -u mlbowers --full prefix=@(session)
+    process_contains = kill_by(session)
+    if process_exists(process_contains):
+        pkill -u mlbowers --full @(process_contains)
         print("killed processes")
     else:
         print("no processes to kill")
@@ -149,13 +158,13 @@ class Plot:
     def __init__(self,name):
         self.plot_name = name
         self.names = []
-def parse_job(name, return_plots=False):
+def parse_job(sess_name, return_plots=False):
     """
     parse the sessions in the job file of the given name and return a dict of {window_name:cmd}
     """
-    if not job_exists(name):
-        die(f"Job {name} doesn't exist")
-    file = get_job_file(name)
+    if not job_exists(sess_name):
+        die(f"Job {sess_name} doesn't exist")
+    file = get_job_file(sess_name)
     assert file.exists(), "should never happen"
 
     shared = {}
@@ -222,7 +231,8 @@ def parse_job(name, return_plots=False):
         if win_name in windows:
             die(f"You reused the same window name: {win_name}")
         if mangle:
-            cmd = f'{BASE_CMD} {cmd} prefix={name} name={win_name}'
+            killby = kill_by(sess_name)
+            cmd = f'{BASE_CMD} {cmd} prefix={sess_name} name={win_name} {killby}'
         windows[win_name] = f'{cmd} {curr_shared}'
         if in_plot is not None:
             plots[in_plot].append(win_name)
