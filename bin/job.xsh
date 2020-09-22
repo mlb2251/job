@@ -4,20 +4,27 @@ import time
 from subprocess import CalledProcessError
 import mlb
 import pathlib
+import re
 
+BASE_CMD = "cd ~/proj/ec && python bin/test_list_repl.py"
 
 
 parser = argparse.ArgumentParser()
 
 parser.add_argument('mode',
                     type=str,
-                    choices=['new','edit','run','kill','view','ls','del','plot'] + ['n','e','r','k','v'],
+                    choices=['new','edit','run','kill','view','ls','copy','del','plot'] + ['n','e','r','k','v'],
                     help='operation to run')
 parser.add_argument('name',
                     type=str,
                     default=None,
                     nargs='?',
-                    help='experiment name (used to find the right file)')
+                   help='experiment name (used to find the right file)')
+parser.add_argument('name2',
+                    type=str,
+                    default=None,
+                    nargs='?',
+                   help='second experiment name used by some commands')
 parser.add_argument('-f',
                     action='store_true',
                     help='force to kill existing session by same name if it exists')
@@ -65,6 +72,10 @@ if args.mode not in ['ls']:
     if args.name is None:
         parser.print_help()
         die(f"Please provide a job name")
+if args.mode not in ['copy']:
+    if args.name2 is not None:
+        parser.print_help()
+        die(f"only provide one name please")
 
 def get_job_file(name):
     return jobs_dir/name
@@ -148,8 +159,10 @@ def parse_job(name, return_plots=False):
     assert file.exists(), "should never happen"
 
     shared = {}
+    vars = {}
     plots = []
     in_plot = None
+    mangle = True
     
     windows = {}
     for line in open(file,'r'):
@@ -168,6 +181,13 @@ def parse_job(name, return_plots=False):
                     key = ''
                 args = ' '.join(args).strip()
                 shared[key] = args
+            elif metacmd == 'var':
+                vars[args[0]] = ' '.join(args[1:]).strip()
+            elif metacmd == 'mangle':
+                args = ' '.join(args).strip()
+                if args not in ['on','off']:
+                    die(f"!mangle expects argument 'on' or 'off' not {mangle}")
+                mangle = (args == 'on')
             elif metacmd == 'plot':
                 if len(args) == 0:
                     in_plot = None # exit plotting
@@ -186,11 +206,24 @@ def parse_job(name, return_plots=False):
         curr_shared = ' '.join(list(shared.values()))
 
         win_name, *cmd = line.split(':')
+        if win_name.startswith(session):
+            die(f"run name {win_name} starts with the session name {session} which is not allowed bc it creates weird tmux issues")
         cmd = ':'.join(cmd) # in case it had any colons in it
         cmd = cmd.strip()
+        while '$!' in cmd:
+            # regex matching something like $!my_var_name_2_woo
+            match = re.search(r'\$!\w+',cmd)
+            if match is None:
+                die(f"Theres a $! in this command but no variable name: {cmd}")
+            var_name = match.group()[2:]
+            if var_name not in vars:
+                die(f"Var not found: {var_name} while parsing command: {cmd}")
+            cmd = cmd.replace(match.group(),vars[var_name])
         if win_name in windows:
             die(f"You reused the same window name: {win_name}")
-        windows[win_name] = f'cd ~/proj/ec && python bin/test_list_repl.py {cmd} prefix={name} name={win_name} {curr_shared}'
+        if mangle:
+            cmd = f'{BASE_CMD} {cmd} prefix={name} name={win_name}'
+        windows[win_name] = f'{cmd} {curr_shared}'
         if in_plot is not None:
             plots[in_plot].append(win_name)
     print(f"Parsed {len(windows)} windows")
@@ -225,6 +258,19 @@ if args.mode == 'new':
         die(f"A job named {session} already exists, you may want to edit it or delete it")
     vim @(get_job_file(session))
     print(f"[Created job file for {session}]")
+    sys.exit(0)
+elif args.mode == 'copy':
+    if args.name2 is None:
+        die("please use the syntax `job copy source target`")
+    src = args.name
+    dst = args.name2
+    if not job_exists(src):
+        die(f"can't find job {src}")
+    if job_exists(dst):
+        die(f"job already exists {dst}")
+    cp @(get_job_file(src)) @(get_job_file(dst))
+    vim @(get_job_file(dst))
+    print(f"[Updated job file for {dst}]")
     sys.exit(0)
 elif args.mode == 'edit':
     if not job_exists(session):
