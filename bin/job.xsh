@@ -13,7 +13,7 @@ parser = argparse.ArgumentParser()
 
 parser.add_argument('mode',
                     type=str,
-                    choices=['new','edit','run','kill','view','ls','copy','del','plot'] + ['n','e','r','k','v'],
+                    choices=['new','diff','edit','run','rename','kill','view','ls','copy','del','plot'] + ['n','e','r','k','v'],
                     help='operation to run')
 parser.add_argument('name',
                     type=str,
@@ -72,7 +72,7 @@ if args.mode not in ['ls']:
     if args.name is None:
         parser.print_help()
         die(f"Please provide a job name")
-if args.mode not in ['copy']:
+if args.mode not in ['copy','rename','diff']:
     if args.name2 is not None:
         parser.print_help()
         die(f"only provide one name please")
@@ -219,11 +219,11 @@ def parse_job(sess_name, return_plots=False):
             die(f"run name {win_name} starts with the session name {session} which is not allowed bc it creates weird tmux issues")
         cmd = ':'.join(cmd) # in case it had any colons in it
         cmd = cmd.strip()
-        while '$!' in cmd:
+        while '!$' in cmd:
             # regex matching something like $!my_var_name_2_woo
-            match = re.search(r'\$!\w+',cmd)
+            match = re.search(r'!\$\w+',cmd)
             if match is None:
-                die(f"Theres a $! in this command but no variable name: {cmd}")
+                die(f"Theres a !$ in this command but no variable name: {cmd}")
             var_name = match.group()[2:]
             if var_name not in vars:
                 die(f"Var not found: {var_name} while parsing command: {cmd}")
@@ -268,6 +268,29 @@ if args.mode == 'new':
         die(f"A job named {session} already exists, you may want to edit it or delete it")
     vim @(get_job_file(session))
     print(f"[Created job file for {session}]")
+    sys.exit(0)
+elif args.mode == 'diff':
+    if args.name2 is None:
+        die("please use the syntax `job diff job1 job2`")
+    fst = args.name
+    snd = args.name2
+    if not job_exists(fst):
+        die(f"can't find job {fst}")
+    if not job_exists(snd):
+        die(f"can't find job {snd}")
+    vimdiff @(get_job_file(fst)) @(get_job_file(snd))
+    sys.exit(0)
+elif args.mode == 'rename':
+    if args.name2 is None:
+        die("please use the syntax `job rename old new`")
+    src = args.name
+    dst = args.name2
+    if not job_exists(src):
+        die(f"can't find job {src}")
+    if job_exists(dst):
+        die(f"job already exists {dst}")
+    mv @(get_job_file(src)) @(get_job_file(dst))
+    print(f"[Renamed job {src} -> {dst}]")
     sys.exit(0)
 elif args.mode == 'copy':
     if args.name2 is None:
