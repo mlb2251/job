@@ -11,7 +11,7 @@ parser = argparse.ArgumentParser()
 
 parser.add_argument('mode',
                     type=str,
-                    choices=['new','edit','run','kill','view','ls','del'] + ['n','e','r','k','v'],
+                    choices=['new','edit','run','kill','view','ls','del','plot'] + ['n','e','r','k','v'],
                     help='operation to run')
 parser.add_argument('name',
                     type=str,
@@ -134,7 +134,11 @@ def view_session(session):
         die(f"Can't find session {session}")
     tmux a -t @(session)
 
-def parse_job(name):
+class Plot:
+    def __init__(self,name):
+        self.plot_name = name
+        self.names = []
+def parse_job(name, return_plots=False):
     """
     parse the sessions in the job file of the given name and return a dict of {window_name:cmd}
     """
@@ -144,6 +148,8 @@ def parse_job(name):
     assert file.exists(), "should never happen"
 
     shared = {}
+    plots = []
+    in_plot = None
     
     windows = {}
     for line in open(file,'r'):
@@ -154,13 +160,22 @@ def parse_job(name):
             continue # comment
         if line.startswith('!'):
             metacmd,*args = line[1:].split(' ')
-            args = ' '.join(args)
+            args = [a for a in args if a != '']
             if metacmd.startswith('shared'):
                 if '(' in metacmd: # "shared(4)" syntax
                     key = metacmd[metacmd.index('(')+1: metacmd.index(')')]
                 else:
                     key = ''
+                args = ' '.join(args).strip()
                 shared[key] = args
+            elif metacmd == 'plot':
+                if len(args) == 0:
+                    in_plot = None # exit plotting
+                    continue
+                in_plot = Plot(args[0],args[1])
+                if any([p.plot_name == args[0] for p in plots]):
+                    die(f"You reused the plot title {plot_title} in !plot directives")
+                plots.append(in_plot) # create a new plot
             else:
                 die(f"unrecognized metacommand: {metacmd}")
             continue
@@ -173,8 +188,14 @@ def parse_job(name):
         win_name, *cmd = line.split(':')
         cmd = ':'.join(cmd) # in case it had any colons in it
         cmd = cmd.strip()
+        if win_name in windows:
+            die(f"You reused the same window name: {win_name}")
         windows[win_name] = f'cd ~/proj/ec && python bin/test_list_repl.py {cmd} prefix={name} name={win_name} {curr_shared}'
+        if in_plot is not None:
+            plots[in_plot].append(win_name)
     print(f"Parsed {len(windows)} windows")
+    if return_plots:
+        return windows,plots
     return windows
 
 def new_session(sess_name):
@@ -223,6 +244,18 @@ elif args.mode == 'run':
     windows = parse_job(session)
     new_windows(session,windows)
     view_session(session)
+    sys.exit(0)
+elif args.mode == 'plot':
+    die(f"not totally implemented yet, or maybe it works idk")
+    _,plots = parse_job(session)
+    pushd $HOME/proj/ec
+    for plot in plots:
+        print(f"Plotting {plot_name}")
+        load= '___'.join([session+'.'+name for name in plot.names]) # put in prefix.name format with triple underscores
+        echo python bin/test_list_repl.py mode=plot plot.title=@(plot.plot_name) load=@(load) plot.suffix=@(plot.suffix)
+        python bin/test_list_repl.py mode=plot plot.title=@(plot.plot_name) load=@(load) plot.suffix=@(plot.suffix)
+        print(f"Plotted")
+    popd
     sys.exit(0)
 elif args.mode == 'kill':
     kill(session)
