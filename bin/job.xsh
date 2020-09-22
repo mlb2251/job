@@ -142,18 +142,38 @@ def parse_job(name):
         die(f"Job {name} doesn't exist")
     file = get_job_file(name)
     assert file.exists(), "should never happen"
+
+    shared = {}
     
     windows = {}
     for line in open(file,'r'):
         line = line.strip()
         if line == '':
+            continue # empty line
+        if line.startswith('#'):
+            continue # comment
+        if line.startswith('!'):
+            metacmd,*args = line[1:].split(' ')
+            args = ' '.join(args)
+            if metacmd.startswith('shared'):
+                if '(' in metacmd: # "shared(4)" syntax
+                    key = metacmd[metacmd.index('(')+1: metacmd.index(')')]
+                else:
+                    key = ''
+                shared[key] = args
+            else:
+                die(f"unrecognized metacommand: {metacmd}")
             continue
+        
         if ':' not in line:
             die(f"Colon missing in line: {line}, aborting")
+        
+        curr_shared = ' '.join(list(shared.values()))
+
         win_name, *cmd = line.split(':')
         cmd = ':'.join(cmd) # in case it had any colons in it
         cmd = cmd.strip()
-        windows[win_name] = f'cd ~/proj/ec && python bin/test_list_repl.py {cmd} prefix={name} name={win_name}'
+        windows[win_name] = f'cd ~/proj/ec && python bin/test_list_repl.py {cmd} prefix={name} name={win_name} {curr_shared}'
     print(f"Parsed {len(windows)} windows")
     return windows
 
@@ -170,7 +190,6 @@ def new_window(sess_name,win_name,cmd=None):
         # active already so this will run in that new window)
         # (Note: C-m is like <CR>)
         tmux send-keys -t @(sess_name) @(cmd) C-m
-    print("made it")
 
 def new_windows(sess_name, windows):
     for i,(win_name,cmd) in enumerate(windows.items()):
