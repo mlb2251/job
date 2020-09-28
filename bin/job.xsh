@@ -5,6 +5,7 @@ from subprocess import CalledProcessError
 import mlb
 import pathlib
 import re
+from collections import defaultdict
 
 BASE_CMD = "cd ~/proj/ec && python bin/matt.py"
 
@@ -167,57 +168,19 @@ def parse_job(sess_name, return_plots=False):
     file = get_job_file(sess_name)
     assert file.exists(), "should never happen"
 
+    windows = {}
     shared = {}
     vars = {}
     plots = []
     in_plot = None
     mangle = True
-    
-    windows = {}
-    for line in open(file,'r'):
-        line = line.strip()
-        if line == '':
-            continue # empty line
-        if line.startswith('#'):
-            continue # comment
-        if line.startswith('!'):
-            metacmd,*args = line[1:].split(' ')
-            args = [a for a in args if a != '']
-            if metacmd.startswith('shared'):
-                if '(' in metacmd: # "shared(4)" syntax
-                    key = metacmd[metacmd.index('(')+1: metacmd.index(')')]
-                else:
-                    key = ''
-                args = ' '.join(args).strip()
-                shared[key] = args
-            elif metacmd == 'var':
-                vars[args[0]] = ' '.join(args[1:]).strip()
-            elif metacmd == 'mangle':
-                args = ' '.join(args).strip()
-                if args not in ['on','off']:
-                    die(f"!mangle expects argument 'on' or 'off' not {mangle}")
-                mangle = (args == 'on')
-            elif metacmd == 'plot':
-                if len(args) == 0:
-                    in_plot = None # exit plotting
-                    continue
-                in_plot = Plot(args[0],args[1])
-                if any([p.plot_name == args[0] for p in plots]):
-                    die(f"You reused the plot title {plot_title} in !plot directives")
-                plots.append(in_plot) # create a new plot
-            else:
-                die(f"unrecognized metacommand: {metacmd}")
-            continue
-        
-        if ':' not in line:
-            die(f"Colon missing in line: {line}, aborting")
-        
-        curr_shared = ' '.join(list(shared.values()))
+    params = defaultdict(dict)
 
-        win_name, *cmd = line.split(':')
+
+    def add_window(win_name,cmd):
+        curr_shared = ' '.join(list(shared.values()))
         if win_name.startswith(session):
             die(f"run name {win_name} starts with the session name {session} which is not allowed bc it creates weird tmux issues")
-        cmd = ':'.join(cmd) # in case it had any colons in it
         cmd = cmd.strip()
         while '!$' in cmd:
             # regex matching something like $!my_var_name_2_woo
@@ -236,6 +199,68 @@ def parse_job(sess_name, return_plots=False):
         windows[win_name] = f'{cmd} {curr_shared}'
         if in_plot is not None:
             plots[in_plot].append(win_name)
+    
+    for line in open(file,'r'):
+        line = line.strip()
+        if line == '':
+            continue # empty line
+        if line.startswith('#'):
+            continue # comment
+        if line.startswith('!'):
+            metacmd,*args = line[1:].split(' ')
+            args = [a for a in args if a != '']
+            if metacmd.startswith('shared'):
+                if '(' in metacmd: # "shared(4)" syntax
+                    key = metacmd[metacmd.index('(')+1: metacmd.index(')')]
+                else:
+                    key = ''
+                args = ' '.join(args).strip()
+                shared[key] = args
+            elif metacmd == 'var':
+                vars[args[0]] = ' '.join(args[1:]).strip()
+            elif metacmd == 'param':
+                if len(args) < 2:
+                    die(f"Invalid number of arguments to !param in line: {line}")
+                params[args[0]][args[1]] = ' '.join(args[2:]).strip()
+            elif metacmd == 'from_params':
+                cmd = []
+                win_name = []
+                for arg in args:
+                    if '=' not in arg:
+                        die(f'each space separated argument to !from_params should have an equals sign in it but this doesnt: {arg}')
+                    param,val = arg.split('=')
+                    if param not in params:
+                        die(f'unable to find parameter `{param}` when parsing this argument to from_params (are you sure you defined it with !param?): {arg}')
+                    if val not in params[param]:
+                        die(f'unable to find option `{val}` in params[{param}] when parsing this argument to from_params: {arg}')
+                    cmd.append(params[param][val])
+                    win_name.append(val)
+                win_name = '.'.join(win_name)
+                cmd.append(f'test.model_result_path={win_name}')
+                cmd = ' '.join(cmd)
+                add_window(win_name,cmd)
+            elif metacmd == 'mangle':
+                args = ' '.join(args).strip()
+                if args not in ['on','off']:
+                    die(f"!mangle expects argument 'on' or 'off' not {mangle}")
+                mangle = (args == 'on')
+            elif metacmd == 'plot':
+                if len(args) == 0:
+                    in_plot = None # exit plotting
+                    continue
+                in_plot = Plot(args[0],args[1])
+                if any([p.plot_name == args[0] for p in plots]):
+                    die(f"You reused the plot title {plot_title} in !plot directives")
+                plots.append(in_plot) # create a new plot
+            else:
+                die(f"unrecognized metacommand: {metacmd}")
+            continue
+        else: # normal line
+            if ':' not in line:
+                die(f"Colon missing in line: {line}, aborting")
+            win_name, *cmd = line.split(':')
+            add_window(win_name, cmd)
+
     print(f"Parsed {len(windows)} windows")
     if return_plots:
         return windows,plots
