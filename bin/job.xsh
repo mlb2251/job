@@ -2,12 +2,14 @@ import sys,os
 import argparse
 import time
 from subprocess import CalledProcessError
+import datetime
 import mlb
 import pathlib
 import re
 from collections import defaultdict
 
 BASE_CMD = "cd ~/proj/ec && python bin/matt.py"
+time_str = datetime.datetime.now().strftime('%m-%d.%H-%M-%S_.') 
 
 
 parser = argparse.ArgumentParser()
@@ -236,7 +238,8 @@ def parse_job(sess_name, return_plots=False):
                     cmd.append(params[param][val])
                     win_name.append(val)
                 win_name = '.'.join(win_name)
-                cmd.append(f'test.model_result_path={win_name}')
+                mod_results_str = time_str + win_name
+                cmd.append(f'test.model_result_path={mod_results_str}')
                 cmd = ' '.join(cmd)
                 add_window(win_name,cmd)
             elif metacmd == 'mangle':
@@ -259,6 +262,7 @@ def parse_job(sess_name, return_plots=False):
             if ':' not in line:
                 die(f"Colon missing in line: {line}, aborting")
             win_name, *cmd = line.split(':')
+            cmd = ':'.join(cmd)
             add_window(win_name, cmd)
 
     print(f"Parsed {len(windows)} windows")
