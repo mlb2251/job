@@ -149,7 +149,7 @@ def sorted_jobs():
     jobs = []
     for name in jobs_dir.iterdir():
         jobs.append((name.name,os.path.getmtime(get_job_file(name.name)))) # get last modified time (float: time since unix epoch)
-    jobs = sorted(jobs, reverse=True, key=lambda x:x[1])
+    jobs = sorted(jobs, key=lambda x:x[1])
     return [job[0] for job in jobs] # strip out the modification time
 
 def view_session(session):
