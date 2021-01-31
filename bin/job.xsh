@@ -287,7 +287,7 @@ def new_window(sess_name,win_name,cmd=None):
 def new_windows(sess_name, windows):
     for i,(win_name,cmd) in enumerate(windows.items()):
         new_window(sess_name, win_name, cmd)
-        time.sleep(1.01) # so that the hydra session gets a different name
+        time.sleep(3.01) # so that the hydra session gets a different name
 
 
 
