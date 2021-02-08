@@ -8,7 +8,8 @@ import pathlib
 import re
 from collections import defaultdict
 
-BASE_CMD = "cd ~/proj/ec && python bin/matt.py"
+BASE_DIR = "cd ~/proj/ec"
+BASE_CMD = "python bin/matt.py"
 time_str = datetime.datetime.now().strftime('%m-%d.%H-%M-%S_.') 
 
 
@@ -31,6 +32,9 @@ parser.add_argument('name2',
 parser.add_argument('-f',
                     action='store_true',
                     help='force to kill existing session by same name if it exists')
+parser.add_argument('-n',
+                    action='store_true',
+                    help='new version with job_name instead of `prefix` and such')
 #parser.add_argument('--no-name',
 #                    action='store_true',
 #                    help='suppress inserting name=[window name] at the end of the command')
@@ -59,6 +63,8 @@ elif args.mode == 'k':
     args.mode = 'kill'
 elif args.mode == 'v':
     args.mode = 'view'
+
+global_args = args
 
 def die(msg):
     mlb.red(msg)
@@ -197,8 +203,13 @@ def parse_job(sess_name, return_plots=False):
             die(f"You reused the same window name: {win_name}")
         if mangle:
             killby = kill_by(sess_name)
-            cmd = f'{BASE_CMD} {cmd} prefix={sess_name} name={win_name} {killby}'
-        windows[win_name] = f'{cmd} {curr_shared}'
+            prefix_key = 'prefix' if not global_args.n else 'job_name'
+            name_key = 'name' if not global_args.n else 'run_name'
+            cmd = f'{BASE_CMD} {cmd} {prefix_key}={sess_name} {name_key}={win_name} {killby}'
+        if global_args.n:
+            windows[win_name] = f'{BASE_DIR} && $[{cmd} {curr_shared}]'
+        else:
+            windows[win_name] = f'{BASE_DIR} && {cmd} {curr_shared}'
         if in_plot is not None:
             plots[in_plot].append(win_name)
     
@@ -219,11 +230,14 @@ def parse_job(sess_name, return_plots=False):
                 args = ' '.join(args).strip()
                 shared[key] = args
             elif metacmd == 'var':
-                vars[args[0]] = ' '.join(args[1:]).strip()
+                raise NotImplementedError
+                # vars[args[0]] = ' '.join(args[1:]).strip()
             elif metacmd == 'param':
                 if len(args) < 2:
                     die(f"Invalid number of arguments to !param in line: {line}")
-                params[args[0]][args[1]] = ' '.join(args[2:]).strip()
+                a0 = args[0]
+                a1 = args[1]
+                params[a0][a1] = ' '.join(args[2:]).strip()
             elif metacmd == 'from_params':
                 cmd = []
                 win_name = []
