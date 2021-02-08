@@ -14,8 +14,9 @@ from collections import defaultdict
 from fastcore.utils import run
 
 
-BASE_CMD = "cd ~/proj/ec && python bin/matt.py"
-time_str = datetime.datetime.now().strftime('%m-%d.%H-%M-%S.') 
+BASE_DIR = "/scratch/mlbowers/proj/ec"
+BASE_CMD = "python bin/matt.py"
+time_str = datetime.datetime.now().strftime('%m-%d.%H-%M-%S') 
 
 
 parser = argparse.ArgumentParser()
@@ -124,7 +125,7 @@ def get_session(job_name):
     """
     get the tmux session for a job if it exists (else None)
     """
-    results = server.where(dict(session_name=name))
+    results = server.where(dict(session_name=job_name))
     if len(results) == 0:
       return None
     if len(results) == 1:
@@ -171,123 +172,152 @@ class JobParser:
   def __init__(self,job_name) -> None:
     self.job_name = job_name
     self.file = jobfile(job_name)
-    self.windows = {}
+    self.windows = {} # str -> str
     self.shared_local = {} # str -> str
     self.shared_global = ''
-    self.vars = {}
-    self.mangle = True
     self.params = defaultdict(dict) # param_name:str -> param_variant:str -> effect:str
+    self.lineno = 0
+
+    self.sess = None
+
 
     if not self.file.exists():
-        die(f"Job {job_name} doesn't exist")
+        die(f"Job '{job_name}' doesn't exist")
+
+  def start(self):
+    try:
+        self.parse()
+    except Exception as e:
+        self.error(f'{e}')
+    self.launch_session()
+    for run_name,cmd in self.windows.items():
+        self.launch_window(run_name,cmd)
+    launch_view(self.job_name)
+
+  def launch_session(self):
+    print(f"Launching session: {self.job_name}")
+    # tmux new-session -d -s @(sess_name)
+    if get_session(self.job_name) is not None:
+        # session exists
+        if not args.f:
+            die(f'{self.job_name} is already running, add `-f` to kill')
+        kill_session_and_processess(self.job_name)
+        assert get_session(self.job_name) is None
+
+    # make new session in proj/ec with job_name as name
+    sess = server.new_session(self.job_name, attach=False, start_directory=BASE_DIR, window_name='info')
+    # make the first window of the session an "info" pane with the job details
+    sess.windows[0].panes[0].send_keys(f'cat {jobfile(self.job_name)}',suppress_history=False)
+    self.sess = sess
+
+  def launch_window(self, run_name:str, cmd:str):
+    """
+    Add a new tmux window named `run_name` to existing tmux session `self.job_name` and
+        send it command `cmd` then hit enter.
+    Send cmd=None to simply create the window without sending a command
+    """
+    assert self.sess is not None
+    print(f"* Launching window {run_name}: {cmd}")
+    # make window named run_name
+    window = self.sess.new_window(attach=False, window_name=run_name, start_directory=BASE_DIR)
+
+    if cmd is None:
+        return
+
+    # send and execute the command. It'll hit <CR> for us.
+    
+    window.panes[0].send_keys(cmd,suppress_history=False)
+
+  def add_window(self, name:str, cmd:str):
+      if name in self.windows:
+          self.error(f'window name used twice: {name}')
+      if name.startswith(self.job_name):
+          self.error(f'run name {name} starts with job name {self.job_name} which isnt allowed in tmux')
+      self.windows[name] = cmd
+
+  def add_param(self, param:str, variant:str, cmd:str):
+      if param in self.params and variant in self.params[param]:
+          self.error(f'param variant "{param}={variant}" already exists')
+      self.params[param][variant] = cmd
+  def get_shared(self):
+      return ' '.join(self.shared_local.values()) + self.shared_global
+
+  def error(self,s):
+    mlb.red(f'Error parsing "{self.job_name}" line {self.lineno}: {self.line}')
+    die(f'Error: {s}')
+
+  def parse_variants(self,args):
+    cmd = ''
+    variants = []
+    for arg in args:
+        if '=' not in arg:
+            self.error(f'each space separated argument to `test` should have an equals sign in it but this doesnt: {arg}')
+        param,variant = arg.split('=')
+        if param not in self.params:
+            self.error(f'unable to find param `{param}` when parsing the argument {arg} to `test` (are you sure you defined it with `param`?)')
+        if variant not in self.params[param]:
+            self.error(f'unable to find variant `{variant}` for param `{param}` when parsing the argument {arg} to `test` (are you sure you defined it with `param`?)')
+        cmd += ' ' + self.params[param][variant]
+        variants.append(variant)
+    run_name = '.'.join(variants)
+    return run_name, cmd
+
   def parse(self):
     """
+    Parse `self.file` and return a window_name -> 
+
+
     parse the sessions in the job file of the given name and return a dict of {window_name:cmd}
     """
-    for (lineno,line) in enumerate(open(self.file,'r'),start=1):
-
-        def error(s):
-            die(f'Error parsing {self.job_name} line {lineno}: {s}')
+    for self.lineno,self.line in enumerate(open(self.file,'r'),start=1):
 
         line = line.strip()
         if line == '':
             continue # empty line
         if line.startswith('#'):
             continue # comment
-        cmd,*args = [l for l in line.split(' ') if l != '']
 
-        if cmd == 'raw': # launch a verbatim bash command
-            pass
-        elif cmd == 'test': # launch a testing run
-            shellcmd = ''
-            variants = []
-            for arg in args:
-                if '=' not in arg:
-                    error(f'each space separated argument to `test` should have an equals sign in it but this doesnt: {arg}')
-                param,variant = arg.split('=')
-                if param not in self.params:
-                    error(f'unable to find param `{param}` when parsing the argument {arg} to `test` (are you sure you defined it with `param`?)')
-                if variant not in self.params[param]:
-                    error(f'unable to find variant `{variant}` for param `{param}` when parsing the argument {arg} to `test` (are you sure you defined it with `param`?)')
-                cmd += self.params[param][variant]
-                variants.append(variant)
-            run_name = '.'.join(variants)
-            mod_results_str = time_str + run_name
-            raise NotImplementedError
-            cmd.append(f'test.model_result_path={mod_results_str}')
-            cmd = ' '.join(cmd)
-            add_window(win_name,cmd)
-            pass
-        elif cmd == 'train': # launch a training run
-            raise NotImplementedError
-            if ':' not in line:
-                die(f"Colon missing in line: {line}, aborting")
-            win_name, *cmd = line.split(':')
-            cmd = ':'.join(cmd)
-            add_window(win_name, cmd)
-            pass
-        elif cmd.startswith('shared'): # set some shared args
-            if '(' in cmd: # "shared(4)" syntax
-                key = cmd[cmd.index('(')+1: cmd.index(')')]
-                self.shared_local[key] = ' '.join(args)
-            else:
-                self.shared_global += ' '.join(args)
-        elif cmd == 'param': # define a parameter
+        mode,*args = [l for l in line.split(' ') if l != '']
+
+        if mode == 'param': # define a parameter
             if len(args) < 2:
-                error(f"invalid number of arguments to `param`")
-            self.params[args[0]][args[1]] = ' '.join(args[2:])
+                self.error(f"invalid number of arguments to `param`")
+            param = args[0]
+            variant = args[1]
+            cmd = ' '.join(args[2:])
+            self.add_param(param,variant,cmd)
+            continue
+
+        elif mode.startswith('shared'): # set some shared args
+            cmd = ' '.join(args)
+            if '(' in mode: # "shared(4)" syntax
+                key = mode[mode.index('(')+1: mode.index(')')].strip()
+                self.shared_local[key] = cmd
+            else:
+                self.shared_global += f' {cmd}'
+            continue
+
+        elif mode == 'raw': # launch a verbatim bash command where first argument is the window name
+            if len(args) == 0:
+                self.error('missing window name for raw command')
+            win_name = args[0]
+            cmd = ' '.join(args[1:])
+            self.add_window(win_name,cmd)
+            continue
+
+        elif mode == 'run': # launch a train/test run
+            run_name, from_params = self.parse_variants(args)
+            shared = self.get_shared()
+            cmd = f'{CHDIR} && $[{BASE_CMD} job_name={self.job_name} run_name={run_name} {processidentifier(self.job_name)} {shared} {from_params} job_info={time_str}.{self.job_name}.{run_name}]'
+            self.add_window(run_name,cmd)
+            continue
+
         else:
-            error(f"unrecognized command {cmd}")
+            self.error(f"unrecognized command {mode}")
+        assert False
 
-    print(f"Parsed {len(windows)} windows")
-    return windows
-    pass
-
-  def add_run(run_name,cmd):
-    curr_shared = ' '.join(list(shared.values()))
-    if win_name.startswith(session):
-        die(f"run name {win_name} starts with the session name {session} which is not allowed bc it creates weird tmux issues")
-    cmd = cmd.strip()
-    while '!$' in cmd:
-        # regex matching something like $!my_var_name_2_woo
-        match = re.search(r'!\$\w+',cmd)
-        if match is None:
-            die(f"Theres a !$ in this command but no variable name: {cmd}")
-        var_name = match.group()[2:]
-        if var_name not in vars:
-            die(f"Var not found: {var_name} while parsing command: {cmd}")
-        cmd = cmd.replace(match.group(),vars[var_name])
-    if win_name in windows:
-        die(f"You reused the same window name: {win_name}")
-    if mangle:
-        killby = kill_by(sess_name)
-        cmd = f'{BASE_CMD} {cmd} prefix={sess_name} name={win_name} {killby}'
-    windows[win_name] = f'{cmd} {curr_shared}'
-    if in_plot is not None:
-        plots[in_plot].append(win_name)
-    
-
-
-
-def new_session(sess_name):
-    print(f"Launching session: {sess_name}")
-    tmux new-session -d -s @(sess_name)
-
-def new_window(sess_name,win_name,cmd=None):
-    print(f"* Launching window {win_name}: {cmd}")
-    # first make a new window with the right name
-    tmux new-window -t @(sess_name) -n @(win_name)
-    if cmd is not None:
-        # now send keys to the session (which will have the newly created window
-        # active already so this will run in that new window)
-        # (Note: C-m is like <CR>)
-        tmux send-keys -t @(sess_name) @(cmd) C-m
-
-def new_windows(sess_name, windows):
-    for i,(win_name,cmd) in enumerate(windows.items()):
-        new_window(sess_name, win_name, cmd)
-        time.sleep(3.01) # so that the hydra session gets a different name
-
+    print(f"Parsed {len(self.windows)} windows")
+    return
 
 
 session = args.name
