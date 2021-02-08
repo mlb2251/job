@@ -2,6 +2,7 @@
 import sys,os
 import argparse
 import shlex
+import shutil
 import time
 from subprocess import CalledProcessError
 import datetime
@@ -10,8 +11,10 @@ from mlb import die
 import pathlib
 import libtmux
 import re
+import contextlib
 from collections import defaultdict
 from fastcore.utils import run
+from mlb.color import yellow
 
 
 BASE_DIR = "/scratch/mlbowers/proj/ec"
@@ -21,7 +24,7 @@ time_str = datetime.datetime.now().strftime('%m-%d.%H-%M-%S')
 
 parser = argparse.ArgumentParser()
 
-modes = { # modes and valid argcounts
+modes = { # modes and valid subarg counts
   'new':(1,),
   'diff':(2,),
   'edit':(1,),
@@ -44,11 +47,8 @@ parser.add_argument('subargs',
 parser.add_argument('-f',
                     action='store_true',
                     help='force to kill existing session by same name if it exists')
-#parser.add_argument('--no-name',
-#                    action='store_true',
-#                    help='suppress inserting name=[window name] at the end of the command')
 
-args = parser.parse_args()
+jobpy_args = parser.parse_args()
 
 # figure out our directory paths
 root_dir = pathlib.Path(__file__).parent.parent.absolute() # the top level git diretory for job/
@@ -57,30 +57,27 @@ trash_dir = root_dir / 'trash'
 
 # initialize any dirs necessary
 assert root_dir.is_dir()
-if not jobs_dir.is_dir():
-    jobs_dir.mkdir()
-if not trash_dir.is_dir():
-    trash_dir.mkdir()
+jobs_dir.mkdir(exists_ok=True)
+trash_dir.mkdir(exist_ok=True)
 
 # deal with abbvs (allow any unique prefix of a real command)
-if args.mode not in modes:
-  abbv = args.mode
+mode = jobpy_args.mode
+if mode not in modes:
   full = None
-  for mode in modes:
-    if mode.startswith(abbv):
+  for _mode in modes:
+    if _mode.startswith(mode):
       if full is not None:
-        die(f'mode {abbv} ambiguously specifies both {full} and {mode}')
-      full = abbv
+        die(f'mode {mode} ambiguously specifies both {full} and {_mode}')
+      full = _mode
   if full is None:
-    die(f'mode {abbv} is not a valid mode or abbreviation. Modes: {modes}')
-  args.mode = full
+    die(f'mode {mode} is not a valid mode or abbreviation. Modes: {modes}')
+  mode = jobpy_args.mode = full
 
 # check that a valid number of args was given
-if len(args.subargs) not in modes[args.mode]:
-  die(f'invalid number of args ({len(args.subargs)}) for command {args.mode} which accepts any of the following number of args: {modes[args.mode]}')
+if len(jobpy_args.subargs) not in modes[mode]:
+  die(f'invalid number of args ({len(jobpy_args.subargs)}) for command {mode} which accepts any of the following number of args: {modes[mode]}')
 
 server = libtmux.Server()
-
 
 def replace_self(cmd):
   """
@@ -172,17 +169,14 @@ class JobParser:
   def __init__(self,job_name) -> None:
     self.job_name = job_name
     self.file = jobfile(job_name)
+    if not self.file.exists():
+        die(f"Job '{job_name}' doesn't exist")
     self.windows = {} # str -> str
     self.shared_local = {} # str -> str
     self.shared_global = ''
     self.params = defaultdict(dict) # param_name:str -> param_variant:str -> effect:str
     self.lineno = 0
-
     self.sess = None
-
-
-    if not self.file.exists():
-        die(f"Job '{job_name}' doesn't exist")
 
   def start(self):
     try:
@@ -192,14 +186,13 @@ class JobParser:
     self.launch_session()
     for run_name,cmd in self.windows.items():
         self.launch_window(run_name,cmd)
-    launch_view(self.job_name)
 
   def launch_session(self):
     print(f"Launching session: {self.job_name}")
     # tmux new-session -d -s @(sess_name)
     if get_session(self.job_name) is not None:
         # session exists
-        if not args.f:
+        if not jobpy_args.f:
             die(f'{self.job_name} is already running, add `-f` to kill')
         kill_session_and_processess(self.job_name)
         assert get_session(self.job_name) is None
@@ -225,7 +218,6 @@ class JobParser:
         return
 
     # send and execute the command. It'll hit <CR> for us.
-    
     window.panes[0].send_keys(cmd,suppress_history=False)
 
   def add_window(self, name:str, cmd:str):
@@ -319,99 +311,85 @@ class JobParser:
     print(f"Parsed {len(self.windows)} windows")
     return
 
+subargs = jobpy_args.subargs
 
-session = args.name
-if args.mode == 'new':
-    if job_exists(session):
-        die(f"A job named {session} already exists, you may want to edit it or delete it")
-    vim @(get_job_file(session))
-    print(f"[Created job file for {session}]")
+def jobfile_checked(job_name, exists):
+    file = jobfile(job_name)
+    if exists:
+        if not file.exists():
+            die(f"Error: can't find job {job_name}")
+    else:
+        if file.exists():
+            die(f"Error: job {job_name} already exists")
+    return file
+
+if mode == 'new':
+    [job_name] = subargs
+    file = jobfile_checked(job_name, exists=False)
+    print(f"[Creating job file for {job_name}]")
+    replace_self(f'vim {file}')
+
+elif mode == 'diff':
+    [job_name1, job_name2] = subargs
+    file1 = jobfile_checked(job_name1, exists=True)
+    file2 = jobfile_checked(job_name2, exists=True)
+    replace_self(f'vimdiff {file1} {file2}')
+
+elif mode == 'rename':
+    [job_name_old, job_name_new] = subargs
+    file_old = jobfile_checked(job_name_old,exists=True)
+    file_new = jobfile_checked(job_name_new,exists=False)
+    yellow('warning: only do this if you havent already launched the jobs or youre gonna relaunch them')
+    file_old.rename(file_new)
+
+    print(f"[Renamed job {job_name_old} -> {job_name_new}]")
     sys.exit(0)
-elif args.mode == 'diff':
-    if args.name2 is None:
-        die("please use the syntax `job diff job1 job2`")
-    fst = args.name
-    snd = args.name2
-    if not job_exists(fst):
-        die(f"can't find job {fst}")
-    if not job_exists(snd):
-        die(f"can't find job {snd}")
-    vimdiff @(get_job_file(fst)) @(get_job_file(snd))
+
+elif mode == 'copy':
+    [job_name_old, job_name_new] = subargs
+    file_old = jobfile_checked(job_name_old,exists=True)
+    file_new = jobfile_checked(job_name_new,exists=False)
+
+    shutil.copy(file_old,file_new)
+    print(f"[Updated job file for {file_new}]")
+    replace_self(f'vim {file_new}')
+
+elif mode == 'edit':
+    [job_name] = subargs
+    file = jobfile_checked(job_name, exists=True)
+    print(f"[Updated job file for {file}]")
+    replace_self(f'vim {file}')
+
+elif mode == 'run':
+    [job_name] = subargs
+    p = JobParser(job_name)
+    p.start()
+    launch_view(job_name)
+
+elif mode == 'kill':
+    [job_name] = subargs
+    kill_session_and_processess(job_name)
     sys.exit(0)
-elif args.mode == 'rename':
-    if args.name2 is None:
-        die("please use the syntax `job rename old new`")
-    src = args.name
-    dst = args.name2
-    if not job_exists(src):
-        die(f"can't find job {src}")
-    if job_exists(dst):
-        die(f"job already exists {dst}")
-    mv @(get_job_file(src)) @(get_job_file(dst))
-    print(f"[Renamed job {src} -> {dst}]")
+
+elif mode == 'view':
+    [job_name] = subargs
+    file = jobfile_checked(job_name, exists=True)
+    launch_view(job_name)
+
+elif mode == 'del':
+    [job_name] = subargs
+    kill_session_and_processess(job_name)
+    file = jobfile_checked(job_name,exists=True)
+    file.rename(trash_dir / job_name)
+    print(f"moved {job_name} -> {trash_dir / job_name}")
     sys.exit(0)
-elif args.mode == 'copy':
-    if args.name2 is None:
-        die("please use the syntax `job copy source target`")
-    src = args.name
-    dst = args.name2
-    if not job_exists(src):
-        die(f"can't find job {src}")
-    if job_exists(dst):
-        die(f"job already exists {dst}")
-    cp @(get_job_file(src)) @(get_job_file(dst))
-    vim @(get_job_file(dst))
-    print(f"[Updated job file for {dst}]")
-    sys.exit(0)
-elif args.mode == 'edit':
-    if not job_exists(session):
-        die(f"No job named {session} exists")
-    vim @(get_job_file(session))
-    print(f"[Updated job file for {session}]")
-    sys.exit(0)
-elif args.mode == 'run':
-    # handle removing any running session
-    if session_exists(session):
-        if not args.f:
-            die(f"tmux session `{session}` exists. Run with -f to force replacing this session")
-        kill(session)
-    # launch session
-    new_session(session)
-    # launch windows
-    windows = parse_job(session)
-    new_windows(session,windows)
-    view_session(session)
-    sys.exit(0)
-elif args.mode == 'plot':
-    die(f"not totally implemented yet, or maybe it works idk")
-    _,plots = parse_job(session)
-    pushd $HOME/proj/ec
-    for plot in plots:
-        print(f"Plotting {plot_name}")
-        load= '___'.join([session+'.'+name for name in plot.names]) # put in prefix.name format with triple underscores
-        echo python bin/test_list_repl.py mode=plot plot.title=@(plot.plot_name) load=@(load) plot.suffix=@(plot.suffix)
-        python bin/test_list_repl.py mode=plot plot.title=@(plot.plot_name) load=@(load) plot.suffix=@(plot.suffix)
-        print(f"Plotted")
-    popd
-    sys.exit(0)
-elif args.mode == 'kill':
-    kill(session)
-    sys.exit(0)
-elif args.mode == 'view':
-    view_session(session)
-    sys.exit(0)
-elif args.mode == 'del':
-    kill(session)
-    if not job_exists(session):
-        die("job doesnt exist")
-    get_job_file(session).rename(trash_dir / session)
-    print(f"moved {session} to trash")
-elif args.mode == 'ls':
-    for name in sorted_jobs():
-        if session_exists(name):
-            mlb.green(f"{name}") # print in green if already running
+
+elif mode == 'ls':
+    for job_name in sorted_jobs():
+        if get_session(job_name) is not None:
+            mlb.green(f"{job_name}") # print in green if already running
         else:
-            mlb.red(f"{name}") # else print normally
+            mlb.red(f"{job_name}") # else print normally
     sys.exit(0)
 
 
