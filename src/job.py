@@ -5,9 +5,7 @@ import shlex
 import shutil
 import time
 from subprocess import CalledProcessError
-import datetime
 import mlb
-from mlb import die
 import pathlib
 import libtmux
 import re
@@ -15,26 +13,32 @@ import contextlib
 from collections import defaultdict
 from fastcore.utils import run
 from mlb.color import yellow
+from datetime import datetime, timezone
+
+def die(s):
+    mlb.red(s)
+    sys.exit(1)
 
 
 BASE_DIR = "/scratch/mlbowers/proj/ec"
 BASE_CMD = "python bin/matt.py"
-time_str = datetime.datetime.now().strftime('%m-%d.%H-%M-%S') 
+time_str = datetime.now().strftime('%m-%d.%H-%M-%S') 
 
 
 parser = argparse.ArgumentParser()
 
 modes = { # modes and valid subarg counts
   'new':(1,),
-  'diff':(2,),
   'edit':(1,),
   'run':(1,),
-  'rename':(2,),
+  'ls':(0,),
+  'diff':(2,),
+  'mv':(2,),
   'kill':(1,),
   'view':(1,),
-  'ls':(0,),
-  'copy':(2,),
+  'cp':(2,),
   'del':(1,),
+  'file':(1,),
 }
 
 parser.add_argument('mode',
@@ -44,9 +48,12 @@ parser.add_argument('subargs',
                     type=str,
                     nargs='*',
                    help='args to subcommand')
-parser.add_argument('-f',
+parser.add_argument('--force',
                     action='store_true',
                     help='force to kill existing session by same name if it exists')
+parser.add_argument('--first',
+                    action='store_true',
+                    help='only launch the first (non-info) window of the session (used to test)')
 
 jobpy_args = parser.parse_args()
 
@@ -57,7 +64,7 @@ trash_dir = root_dir / 'trash'
 
 # initialize any dirs necessary
 assert root_dir.is_dir()
-jobs_dir.mkdir(exists_ok=True)
+jobs_dir.mkdir(exist_ok=True)
 trash_dir.mkdir(exist_ok=True)
 
 # deal with abbvs (allow any unique prefix of a real command)
@@ -120,7 +127,8 @@ def get_processess(job_name):
 
 def get_session(job_name):
     """
-    get the tmux session for a job if it exists (else None)
+    get the tmux session for a job if it exists (else None).
+    This is very slow if you call it many times, so prefer `list_sessions()` in that case
     """
     results = server.where(dict(session_name=job_name))
     if len(results) == 0:
@@ -138,7 +146,7 @@ def kill_session_and_processess(job_name):
     if sess is not None:
       print(f"killing session {job_name}")
       sess.kill_session()
-    procs = get_processess(job_name):
+    procs = get_processess(job_name)
     for (pid,cmd) in procs:
       print(f"killing process {pid}: {cmd}")
     if len(procs) > 0:
@@ -147,16 +155,6 @@ def kill_session_and_processess(job_name):
       # processess
       run(f'pkill -u {os.environ["USER"]} --full {processidentifier(job_name)}')
 
-def sorted_jobs():
-    """
-    list of names of jobs in jobs folder sorted by last modified time
-    """
-    jobs = []
-    for jobfile in jobs_dir.iterdir():
-      job_name = jobfile.name
-      jobs.append((job_name,jobfile.stat().st_mtime)) # get last modified time (float: time since unix epoch)
-    jobs = sorted(jobs, key=lambda x:x[1])
-    return [job[0] for job in jobs] # strip out the modification time
 
 def launch_view(job_name):
     sess = get_session(job_name)
@@ -186,17 +184,19 @@ class JobParser:
     self.launch_session()
     for run_name,cmd in self.windows.items():
         self.launch_window(run_name,cmd)
+        if jobpy_args.first: # just launch the first window and then execl into it
+            launch_view(self.job_name)
 
   def launch_session(self):
-    print(f"Launching session: {self.job_name}")
     # tmux new-session -d -s @(sess_name)
     if get_session(self.job_name) is not None:
         # session exists
-        if not jobpy_args.f:
-            die(f'{self.job_name} is already running, add `-f` to kill')
+        if not jobpy_args.force:
+            die(f'{self.job_name} is already running, add `--force` to kill')
         kill_session_and_processess(self.job_name)
         assert get_session(self.job_name) is None
 
+    print(f"Launching session: {self.job_name}")
     # make new session in proj/ec with job_name as name
     sess = server.new_session(self.job_name, attach=False, start_directory=BASE_DIR, window_name='info')
     # make the first window of the session an "info" pane with the job details
@@ -263,7 +263,7 @@ class JobParser:
     """
     for self.lineno,self.line in enumerate(open(self.file,'r'),start=1):
 
-        line = line.strip()
+        line = self.line.strip()
         if line == '':
             continue # empty line
         if line.startswith('#'):
@@ -300,7 +300,7 @@ class JobParser:
         elif mode == 'run': # launch a train/test run
             run_name, from_params = self.parse_variants(args)
             shared = self.get_shared()
-            cmd = f'{CHDIR} && $[{BASE_CMD} job_name={self.job_name} run_name={run_name} {processidentifier(self.job_name)} {shared} {from_params} job_info={time_str}.{self.job_name}.{run_name}]'
+            cmd = f'$[{BASE_CMD} job_name={self.job_name} run_name={run_name} {processidentifier(self.job_name)} {shared} {from_params} job_info={time_str}.{self.job_name}.{run_name}]'
             self.add_window(run_name,cmd)
             continue
 
@@ -335,17 +335,17 @@ elif mode == 'diff':
     file2 = jobfile_checked(job_name2, exists=True)
     replace_self(f'vimdiff {file1} {file2}')
 
-elif mode == 'rename':
+elif mode == 'mv':
     [job_name_old, job_name_new] = subargs
     file_old = jobfile_checked(job_name_old,exists=True)
     file_new = jobfile_checked(job_name_new,exists=False)
     yellow('warning: only do this if you havent already launched the jobs or youre gonna relaunch them')
     file_old.rename(file_new)
 
-    print(f"[Renamed job {job_name_old} -> {job_name_new}]")
+    print(f"[Moved job {job_name_old} -> {job_name_new}]")
     sys.exit(0)
 
-elif mode == 'copy':
+elif mode == 'cp':
     [job_name_old, job_name_new] = subargs
     file_old = jobfile_checked(job_name_old,exists=True)
     file_new = jobfile_checked(job_name_new,exists=False)
@@ -384,16 +384,29 @@ elif mode == 'del':
     print(f"moved {job_name} -> {trash_dir / job_name}")
     sys.exit(0)
 
-elif mode == 'ls':
-    for job_name in sorted_jobs():
-        if get_session(job_name) is not None:
-            mlb.green(f"{job_name}") # print in green if already running
-        else:
-            mlb.red(f"{job_name}") # else print normally
+elif mode == 'file':
+    [job_name] = subargs
+    file = jobfile_checked(job_name,exists=True)
+    print(file)
     sys.exit(0)
 
+elif mode == 'ls':
+    active_sessions = [sess.name for sess in server.sessions]
+    jobfiles = [p for p in jobs_dir.iterdir()]
+    jobfiles.sort(key=lambda p: p.stat().st_mtime) # sort by last modified time
 
+    for jobfile in jobfiles:
+        job_name = jobfile.name
+        active = job_name in active_sessions
+        description = ''
+        with jobfile.open() as f:
+            line = f.readline().strip() # doesnt error out on EOF thankfully
+            if line.startswith('#'):
+                description = '\n\t' + line[1:].strip()
+        last_modified = datetime.fromtimestamp(jobfile.stat().st_mtime, tz=timezone.utc).strftime('[%b %d %H:%M:%S]')
+        colored_job_name = mlb.mk_green(job_name) if active else mlb.mk_red(job_name)
+        print(f'{last_modified} {colored_job_name} {description}')
 
-
+    sys.exit(0)
 
 
