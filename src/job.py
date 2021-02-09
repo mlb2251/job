@@ -399,7 +399,7 @@ elif mode == 'ls':
         job_name = jobfile.name
         active = job_name in active_sessions
         description = ''
-        with jobfile.open() as f:
+        with jobfile.open(encoding='utf-8',errors='ignore') as f:
             line = f.readline().strip() # doesnt error out on EOF thankfully
             if line.startswith('#'):
                 description = '\n\t' + line[1:].strip()
