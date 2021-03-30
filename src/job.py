@@ -21,7 +21,7 @@ def die(s):
 
 
 BASE_DIR = "/scratch/mlbowers/proj/ec"
-BASE_CMD = "python bin/matt.py"
+BASE_CMD = "bin/matt.py"
 time_str = datetime.now().strftime('%m-%d.%H-%M-%S') 
 
 
@@ -297,10 +297,14 @@ class JobParser:
             self.add_window(win_name,cmd)
             continue
 
-        elif mode == 'run': # launch a train/test run
+        elif mode in ('run','vprof'): # launch a train/test run
             run_name, from_params = self.parse_variants(args)
             shared = self.get_shared()
-            cmd = f'$[{BASE_CMD} job_name={self.job_name} run_name={run_name} {processidentifier(self.job_name)} {shared} {from_params} job_info={time_str}.{self.job_name}.{run_name}]'
+            cmd = f'{BASE_CMD} job_name={self.job_name} run_name={run_name} {processidentifier(self.job_name)} {shared} {from_params} job_info={time_str}.{self.job_name}.{run_name}'
+            if mode == 'run':
+                cmd = f'![python {cmd}]'
+            elif mode == 'vprof':
+                cmd = f'![vprof -c cp "{cmd}" --output-file profile.json]'
             self.add_window(run_name,cmd)
             continue
 
@@ -314,14 +318,33 @@ class JobParser:
 subargs = jobpy_args.subargs
 
 def jobfile_checked(job_name, exists):
-    file = jobfile(job_name)
     if exists:
-        if not file.exists():
-            die(f"Error: can't find job {job_name}")
+        job_name = search_jobnames(job_name)
+        return jobfile(job_name)
     else:
-        if file.exists():
+        if jobfile(job_name).exists():
             die(f"Error: job {job_name} already exists")
-    return file
+        return jobfile(job_name)
+
+def sorted_jobfiles():
+    jobfiles = [p for p in jobs_dir.iterdir()]
+    jobfiles.sort(key=lambda p: p.stat().st_mtime) # sort by last modified time
+    return jobfiles # note jobname is just jobfile.name
+
+def search_jobnames(job_name):
+    if job_name.isdigit():
+        # so if job_name == '3' we get the 3rd most recent job file returned by ls
+        return sorted_jobfiles()[-int(job_name)].name
+    jobnames = [j.name for j in sorted_jobfiles()]
+    if job_name in jobnames:
+        return job_name # exact match
+    possible = [j.startswith(job_name) for j in jobnames]
+    if len(possible) == 0:
+        die(f"Error: can't find job {job_name}")
+    if len(possible) == 1:
+        return possible[0]
+    else:
+        die(f"Error: job name {job_name} matches multiple jobs: {possible}")
 
 if mode == 'new':
     [job_name] = subargs
@@ -362,22 +385,26 @@ elif mode == 'edit':
 
 elif mode == 'run':
     [job_name] = subargs
+    job_name = search_jobnames(job_name)
     p = JobParser(job_name)
     p.start()
     launch_view(job_name)
 
 elif mode == 'kill':
     [job_name] = subargs
+    job_name = search_jobnames(job_name)
     kill_session_and_processess(job_name)
     sys.exit(0)
 
 elif mode == 'view':
     [job_name] = subargs
+    job_name = search_jobnames(job_name)
     file = jobfile_checked(job_name, exists=True)
     launch_view(job_name)
 
 elif mode == 'del':
     [job_name] = subargs
+    job_name = search_jobnames(job_name)
     kill_session_and_processess(job_name)
     file = jobfile_checked(job_name,exists=True)
     file.rename(trash_dir / job_name)
@@ -390,10 +417,11 @@ elif mode == 'file':
     print(file)
     sys.exit(0)
 
+
+
 elif mode == 'ls':
     active_sessions = [sess.name for sess in server.sessions]
-    jobfiles = [p for p in jobs_dir.iterdir()]
-    jobfiles.sort(key=lambda p: p.stat().st_mtime) # sort by last modified time
+    jobfiles = sorted_jobfiles()
 
     for jobfile in jobfiles:
         job_name = jobfile.name
