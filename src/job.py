@@ -302,9 +302,9 @@ class JobParser:
             shared = self.get_shared()
             cmd = f'{BASE_CMD} job_name={self.job_name} run_name={run_name} {processidentifier(self.job_name)} {shared} {from_params} job_info={time_str}.{self.job_name}.{run_name}'
             if mode == 'run':
-                cmd = f'![python {cmd}]'
+                cmd = f'$[python {cmd}]'
             elif mode == 'vprof':
-                cmd = f'![vprof -c cp "{cmd}" --output-file profile.json]'
+                cmd = f'$[vprof -c cp "{cmd}" --output-file profile.json]'
             self.add_window(run_name,cmd)
             continue
 
